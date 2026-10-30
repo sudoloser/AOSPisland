@@ -5,6 +5,11 @@ public final class Settings {
     public static final android.net.Uri URI = android.net.Uri.parse("content://dev.flexy.dynamicisland.settings");
     public static final String METHOD_GET = "get";
 
+    public static final String ENABLED = "enabled";
+    public static final boolean DEF_ENABLED = true;
+    public static final String HIDE_STOCK_CHIPS = "hide_stock_chips";
+    public static final boolean DEF_HIDE_STOCK_CHIPS = true;
+
     public static final String MAX_CHARS = "max_chars";
     public static final int MIN_MAX_CHARS = 4;
     public static final int MAX_MAX_CHARS = 20;

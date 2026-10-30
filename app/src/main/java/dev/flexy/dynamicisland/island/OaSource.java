@@ -16,16 +16,18 @@ import android.widget.Chronometer;
 import android.widget.FrameLayout;
 import android.widget.RemoteViews;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 import dev.flexy.dynamicisland.xposed.Refl;
 import dev.flexy.dynamicisland.xposed.XLog;
 
-final class OaSource {
+public final class OaSource {
     static final String HELPER = "com.android.systemui.statusbar.phone.ongoingactivity.OngoingActivityDataHelper";
     private static final int CALL_GREEN = 0xFF34C759;
 
@@ -38,6 +40,179 @@ final class OaSource {
     OaSource(Context ctx, ClassLoader cl) {
         this.ctx = ctx;
         this.helper = Refl.findClass(HELPER, cl);
+        instance = this;
+    }
+
+    private static volatile OaSource instance;
+
+    private final java.util.List<Object> aospOrder = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private final Map<View, Object> aospByRoot = new ConcurrentHashMap<>();
+    private final Map<View, Boolean> aospSeenRoots = new ConcurrentHashMap<>();
+    private final Set<View> hiddenChips = ConcurrentHashMap.newKeySet();
+    private final Map<Object, View> aospModelViews = new ConcurrentHashMap<>();
+    private final Map<String, Object> aospByKey = new ConcurrentHashMap<>();
+
+    boolean aosp() {
+        return helper == null;
+    }
+
+    /**
+     * Called from the hook on AOSP's {@code OngoingActivityChipBinder.bind}: remembers the chip
+     * model, hides the stock chip view and refreshes the island.
+     */
+    public static void onAospChip(Object model, Object binding) {
+        OaSource s = instance;
+        if (s == null || model == null || binding == null) return;
+        Object root = Refl.get(binding, "rootView");
+        if (!(root instanceof View)) return;
+        s.trackChip(model, (View) root);
+    }
+
+    private void trackChip(Object model, View root) {
+        boolean inactive = "Inactive".equals(model.getClass().getSimpleName());
+        aospSeenRoots.put(root, Boolean.TRUE);
+        Object previous = aospByRoot.get(root);
+        if (previous == model) {
+            applyChipVisibility(root);
+            return;
+        }
+        if (previous != null) {
+            aospModelViews.remove(previous);
+            forgetKey(previous);
+            int at = aospOrder.indexOf(previous);
+            if (inactive) {
+                if (at >= 0) aospOrder.remove(at);
+            } else if (at >= 0) {
+                aospOrder.set(at, model);
+            }
+        }
+        if (inactive) {
+            aospByRoot.remove(root);
+            aospModelViews.remove(model);
+        } else {
+            aospByRoot.put(root, model);
+            aospModelViews.put(model, root);
+            if (previous == null) aospOrder.add(model);
+            String key = (String) Refl.get(model, "key");
+            if (key != null) {
+                Object same = aospByKey.put(key, model);
+                if (same != null && same != model) {
+                    aospModelViews.remove(same);
+                    aospOrder.remove(same);
+                }
+            }
+        }
+        applyChipVisibility(root);
+        // The chip transition may run right after bind; re-assert once the frame settles.
+        root.post(() -> applyChipVisibility(root));
+        if (previous != model) {
+            IslandController c = IslandController.get();
+            if (c != null) c.requestRefresh();
+        }
+    }
+
+    private void forgetKey(Object model) {
+        String key = (String) Refl.get(model, "key");
+        if (key != null && aospByKey.get(key) == model) aospByKey.remove(key);
+    }
+
+    /** Drops chip bookkeeping when the status bar view goes away, so detached views are not held. */
+    public static void onStatusBarDetached() {
+        OaSource s = instance;
+        if (s == null) return;
+        s.aospByRoot.clear();
+        s.aospSeenRoots.clear();
+        s.hiddenChips.clear();
+        s.aospModelViews.clear();
+        s.aospByKey.clear();
+        s.aospOrder.clear();
+        s.cache.clear();
+    }
+
+    private static void applyChipVisibility(View root) {
+        OaSource s = instance;
+        boolean hide = IslandSettings.hidingChips();
+        root.animate().cancel();
+        if (hide) {
+            if (s != null) s.hiddenChips.add(root);
+            root.setVisibility(View.GONE);
+        } else if (s != null && s.hiddenChips.remove(root)) {
+            // Only undo what we hid; the system's own INVISIBLE state must survive.
+            root.setVisibility(View.VISIBLE);
+        }
+    }
+
+    /** Shows or hides every stock chip view the module took over. Called on refresh. */
+    public static void setChipsVisible(boolean visible) {
+        OaSource s = instance;
+        if (s == null) return;
+        if (!visible) {
+            for (View v : s.aospSeenRoots.keySet()) {
+                if (v == null) continue;
+                v.animate().cancel();
+                v.setVisibility(View.GONE);
+                s.hiddenChips.add(v);
+            }
+            return;
+        }
+        for (View v : s.hiddenChips) {
+            if (v == null) continue;
+            v.animate().cancel();
+            v.setVisibility(View.VISIBLE);
+        }
+        s.hiddenChips.clear();
+    }
+
+    private final Map<String, Integer> resourceIds = new java.util.HashMap<>();
+
+    private int resId(String name) {
+        Integer id = resourceIds.get(name);
+        if (id == null) {
+            id = ctx.getResources().getIdentifier(name, "id", "com.android.systemui");
+            resourceIds.put(name, id);
+        }
+        return id;
+    }
+
+    private static final String[] STOCK_CHIP_IDS = {
+            "ongoing_activity_chip_primary", "ongoing_activity_chip_secondary",
+            "ongoing_activity_capsule", "samsung_ongoing_activity_chip_container",
+            "samsung_status_bar_chips_container", "samsung_ongoing_cast_chip",
+            "ongoing_call_chip",
+    };
+
+    /**
+     * Applies the master switch and the stock-chip switch to the status bar view tree. Safe to
+     * call on every refresh, and the only way back for chips hidden before the switch changed.
+     */
+    public static void applyStockChipVisibility(View statusBar) {
+        OaSource s = instance;
+        boolean hide = IslandSettings.hidingChips();
+        if (s == null || statusBar == null) {
+            setChipsVisible(!hide);
+            return;
+        }
+        for (String name : STOCK_CHIP_IDS) {
+            int id = s.resId(name);
+            if (id == 0) continue;
+            View v = statusBar.findViewById(id);
+            if (v == null) continue;
+            if (hide) {
+                v.animate().cancel();
+                v.setVisibility(View.GONE);
+                s.hiddenChips.add(v);
+            } else if (s.hiddenChips.remove(v)) {
+                v.animate().cancel();
+                v.setVisibility(View.VISIBLE);
+            }
+        }
+        setChipsVisible(!hide);
+    }
+
+    static String packageFromKey(String key) {
+        if (key == null) return null;
+        String[] parts = key.split("\\|", -1);
+        return parts.length >= 2 && notEmpty(parts[1]) ? parts[1] : null;
     }
 
     String foregroundPackage() {
@@ -46,7 +221,32 @@ final class OaSource {
     }
 
     void collect(List<IslandItem> out, Set<String> hiddenByForeground, Collection<String> packages) {
-        if (helper == null) return;
+        if (helper == null) {
+            collectAosp(out, packages);
+        } else {
+            collectSamsung(out, hiddenByForeground, packages);
+        }
+        addCallFromController(out, packages, hiddenByForeground);
+    }
+
+    private void collectAosp(List<IslandItem> out, Collection<String> packages) {
+        int order = 0;
+        for (Object model : aospOrder) {
+            if (model == null || !aospModelViews.containsKey(model)) continue;
+            try {
+                IslandItem it = aospItem(model);
+                if (it == null) continue;
+                if (it.packageName != null) packages.add(it.packageName);
+                it.postTime = Long.MAX_VALUE - order++;
+                out.add(it);
+            } catch (Throwable t) {
+                XLog.e("AOSP chip item failed", t);
+            }
+        }
+    }
+
+    private void collectSamsung(List<IslandItem> out, Set<String> hiddenByForeground,
+                                Collection<String> packages) {
         String fg = foregroundPackage();
         Set<String> pipPackages = pipPackages();
         int order = 0;
@@ -58,11 +258,27 @@ final class OaSource {
         if (hidden != null) {
             for (Object d : hidden) order = add(out, d, order, fg, pipPackages, hiddenByForeground, packages, false);
         }
-        addCallFromController(out, packages, hiddenByForeground);
     }
 
     IslandItem itemForKey(String notificationKey) {
-        if (helper == null || notificationKey == null) return null;
+        if (helper == null) {
+            Object model = notificationKey == null ? null : aospByKey.get(notificationKey);
+            if (model == null) {
+                for (Map.Entry<String, Object> e : aospByKey.entrySet()) {
+                    if (e.getKey().contains(notificationKey)) {
+                        model = e.getValue();
+                        break;
+                    }
+                }
+            }
+            if (model == null) return null;
+            try {
+                return aospItem(model);
+            } catch (Throwable t) {
+                XLog.e("AOSP chip item failed", t);
+                return null;
+            }
+        }
         try {
             for (String name : new String[]{"mOngoingActivityLists", "hiddenOngoingActivityDataList"}) {
                 Object list = Refl.getStatic(helper, name);
@@ -91,6 +307,117 @@ final class OaSource {
         }
         return null;
     }
+
+    private IslandItem aospItem(Object model) {
+        String key = (String) Refl.get(model, "key");
+        if (key == null) return null;
+        Object callInfo = callController == null ? null : Refl.get(callController, "callNotificationInfo");
+        if (callInfo != null) {
+            Object ck = Refl.get(callInfo, "key");
+            if (key.equals(ck) || (ck != null && key.equals("callChip-" + ck)) || key.startsWith("callChip-")) return null;
+        } else if (key.startsWith("callChip-")) {
+            return null;
+        }
+        IslandItem cached = cache.get(model);
+        if (cached != null) return cached;
+
+        String name = model.getClass().getSimpleName();
+        String pkg = packageFromKey(key);
+        IslandItem it = new IslandItem("oa:" + key);
+        it.packageName = pkg;
+        it.appName = appLabel(pkg);
+        it.title = it.appName;
+        it.postTime = Long.MAX_VALUE;
+        it.accent = 0xFFFFFFFF;
+        if (Boolean.TRUE.equals(Refl.get(model, "isHidden"))) return null;
+
+        if ("Timer".equals(name)) {
+            it.kind = IslandItem.Kind.TIMER;
+            Object start = Refl.get(model, "startTimeMs");
+            if (start instanceof Long) {
+                long wall = System.currentTimeMillis()
+                        - (SystemClock.elapsedRealtime() - (Long) start);
+                it.trailing = IslandItem.Trailing.CHRONOMETER;
+                it.chronoBase = wall;
+                it.chronoCountDown = Refl.getBool(model, "isEventInFuture", false);
+            }
+        } else if ("Countdown".equals(name)) {
+            it.kind = IslandItem.Kind.TIMER;
+            Object seconds = Refl.get(model, "secondsUntilStarted");
+            if (seconds instanceof Long) {
+                it.trailing = IslandItem.Trailing.CHRONOMETER;
+                it.chronoBase = System.currentTimeMillis() + (Long) seconds * 1000L;
+                it.chronoCountDown = true;
+            }
+        } else if ("ShortTimeDelta".equals(name)) {
+            Object time = Refl.get(model, "time");
+            if (time instanceof Long) {
+                it.trailing = IslandItem.Trailing.TEXT;
+                it.trailingText = android.text.format.DateUtils.getRelativeTimeSpanString((Long) time);
+            }
+        } else if ("Text".equals(name)) {
+            Object text = Refl.get(model, "text");
+            if (text != null) {
+                it.subtitle = it.appName;
+                it.title = String.valueOf(text);
+            }
+        }
+
+        Drawable chipIcon = chipIcon(Refl.get(model, "icon"));
+        Drawable app = appIcon(pkg);
+        it.icon = chipIcon != null ? chipIcon : app;
+        it.iconIsImage = true;
+        it.cardImage = app;
+        it.cardImageIsImage = true;
+
+        View root = aospModelViews.get(model);
+        if (root != null) {
+            it.iconTap = root::performClick;
+        }
+        cache.put(model, it);
+        return it;
+    }
+
+    private Drawable chipIcon(Object chipIcon) {
+        if (chipIcon == null) return null;
+        String type = chipIcon.getClass().getSimpleName();
+        if ("StatusBarView".equals(type)) {
+            Object impl = Refl.get(chipIcon, "impl");
+            if (impl instanceof android.widget.ImageView) {
+                Drawable d = ((android.widget.ImageView) impl).getDrawable();
+                if (d != null && d.getConstantState() != null) return d.getConstantState().newDrawable().mutate();
+                return null;
+            }
+        }
+        Object impl = Refl.get(chipIcon, "impl");
+        if (impl == null) return null;
+        Object loaded = Refl.get(impl, "drawable");
+        if (loaded instanceof Drawable) {
+            Drawable d = (Drawable) loaded;
+            if (d.getConstantState() != null) return d.getConstantState().newDrawable().mutate();
+            return d;
+        }
+        int res = Refl.getInt(impl, "res", 0);
+        if (res != 0) {
+            try {
+                return ctx.getDrawable(res);
+            } catch (Throwable t) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private String appLabel(String pkg) {
+        if (pkg == null) return null;
+        try {
+            android.content.pm.PackageManager pm = ctx.getPackageManager();
+            return String.valueOf(pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)));
+        } catch (Throwable t) {
+            return pkg;
+        }
+    }
+
 
     static int style(Notification n) {
         if (n == null) return 0;
@@ -361,6 +688,7 @@ final class OaSource {
         String key = (String) Refl.get(info, "key");
         String pkg = (String) Refl.get(info, "packageName");
         if (key == null) return;
+        if (pkg == null) pkg = packageFromKey(key);
         if (pkg != null) packages.add(pkg);
         int state = callState();
         if (state == CALL_NONE) return;
@@ -439,14 +767,14 @@ final class OaSource {
         final PendingIntent fallback = hangIntent;
         IslandItem.Action hang = new IslandItem.Action("End call", hangIcon, null, () -> endCall(telecom, fallback), true);
         if (hangIcon == null) hang.glyph = Glyphs.HANGUP;
-        if (telecom || fallback != null) it.actions.add(hang);
+        if (telecom || fallback != null || callController != null) it.actions.add(hang);
     }
 
     Runnable onChanged;
 
     @SuppressWarnings("deprecation")
     private void endCall(boolean telecom, PendingIntent fallback) {
-        if (telecom) {
+        if (telecom || callController != null) {
             try {
                 android.telecom.TelecomManager tm = ctx.getSystemService(android.telecom.TelecomManager.class);
                 if (tm != null && tm.endCall()) {
@@ -482,7 +810,9 @@ final class OaSource {
 
     private void toggleSpeaker(PendingIntent intent, boolean telecom) {
         try {
-            if (telecom) {
+            if (telecom && routeCommunicationDevice()) {
+                XLog.i("speaker toggled via audio routing");
+            } else if (telecom) {
                 ctx.sendBroadcast(new android.content.Intent(SPEAKER_TOGGLE).setPackage(INCALLUI));
                 XLog.i("speaker toggled via incallui");
             } else if (intent != null) {
@@ -495,6 +825,31 @@ final class OaSource {
             XLog.e("speaker toggle failed", t);
         }
         if (onChanged != null) main.postDelayed(onChanged, 500);
+    }
+
+    /** AOSP has no call actions, so route the communication device directly. */
+    private boolean routeCommunicationDevice() {
+        android.media.AudioManager am = ctx.getSystemService(android.media.AudioManager.class);
+        if (am == null) return false;
+        try {
+            android.media.AudioDeviceInfo current = am.getCommunicationDevice();
+            boolean speaker = current != null
+                    && current.getType() == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER;
+            android.media.AudioDeviceInfo target = null;
+            if (!speaker) {
+                for (android.media.AudioDeviceInfo d : am.getAvailableCommunicationDevices()) {
+                    if (d.getType() == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                        target = d;
+                        break;
+                    }
+                }
+                if (target == null) return false;
+            }
+            return am.setCommunicationDevice(target);
+        } catch (Throwable t) {
+            XLog.e("audio routing failed", t);
+            return false;
+        }
     }
 
     private static boolean isSpeakerTitle(CharSequence title) {

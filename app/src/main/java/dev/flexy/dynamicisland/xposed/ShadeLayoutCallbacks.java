@@ -16,7 +16,8 @@ final class ShadeLayoutCallbacks {
 
     private ShadeLayoutCallbacks() { }
 
-    static void install() {
+    static void install(ClassLoader cl) {
+        if (Refl.findClass(OWNER, cl) == null) return;
         Refl.hookAll(ViewTreeObserver.class, "dispatchOnGlobalLayout", new SafeHook("shade layout dispatch") {
             @Override protected void before(MethodHookParam p) {
                 enter((ViewTreeObserver) p.thisObject);

@@ -208,6 +208,7 @@ final class AlertSource {
         powerSavingBusy = true;
         boolean enabled = !powerSaving();
         new Thread(() -> {
+            boolean done = false;
             try {
                 int user = (Integer) android.app.ActivityManager.class.getMethod("getCurrentUser").invoke(null);
                 android.net.Uri uri = android.net.Uri.parse("content://" + user + "@com.samsung.android.sm.dcapi");
@@ -217,8 +218,10 @@ final class AlertSource {
                     throw new IllegalStateException("Device Care power saving: " + result);
                 }
                 XLog.i("power saving " + enabled + " (Device Care)");
+                done = true;
             } catch (Throwable t) {
-                XLog.e("power saving failed", t);
+                done = aospPowerSaving(enabled);
+                if (!done) XLog.e("power saving failed", t);
             } finally {
                 btMain.post(() -> {
                     powerSavingBusy = false;
@@ -231,6 +234,27 @@ final class AlertSource {
         }, "IslandPowerSaving").start();
     }
 
+    /** AOSP has no Device Care service; ask PowerManager, then fall back to the global setting. */
+    private boolean aospPowerSaving(boolean enabled) {
+        android.os.PowerManager pm = ctx.getSystemService(android.os.PowerManager.class);
+        try {
+            java.lang.reflect.Method m = android.os.PowerManager.class
+                    .getMethod("setPowerSaveModeEnabled", boolean.class);
+            m.setAccessible(true);
+            m.invoke(pm, enabled);
+            XLog.i("power saving " + enabled + " (PowerManager)");
+            return true;
+        } catch (Throwable t) {
+            try {
+                android.provider.Settings.Global.putInt(ctx.getContentResolver(), "low_power", enabled ? 1 : 0);
+                XLog.i("power saving " + enabled + " (global setting)");
+                return true;
+            } catch (Throwable t2) {
+                return false;
+            }
+        }
+    }
+
     IslandItem batteryItem(int level) {
         boolean saving = powerSaving();
         int batteryColor = saving ? POWER_YELLOW : LOW_RED;
@@ -239,10 +263,12 @@ final class AlertSource {
         it.kind = IslandItem.Kind.LIVE;
         it.packageName = ctx.getPackageName();
         Drawable d = statusBarBattery(level, batteryColor);
+        if (d == null) d = new BatteryGlyph(level, batteryColor);
         if (d != null) {
             it.icon = new Fit(d, 1f);
             Drawable big = statusBarBattery(level, batteryColor);
-            it.cardImage = big == null ? null : new Fit(big, 0.72f);
+            if (big == null) big = new BatteryGlyph(level, batteryColor);
+            it.cardImage = new Fit(big, 0.72f);
             it.iconIsImage = true;
             it.cardImageIsImage = true;
         }
@@ -306,8 +332,69 @@ final class AlertSource {
         }
     }
 
-    static final class Fit extends Drawable {
-        private final Drawable inner;
+    /** AOSP has no SamsungBatteryMeterDrawable, so draw the status bar battery shape here. */
+    static final class BatteryGlyph extends Drawable {
+        private final int level;
+        private final int color;
+        private final android.graphics.Paint paint =
+                new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.RectF box = new android.graphics.RectF();
+
+        BatteryGlyph(int level, int color) {
+            this.level = Math.max(0, Math.min(100, level));
+            this.color = color;
+        }
+
+        @Override
+        public void draw(android.graphics.Canvas c) {
+            android.graphics.Rect b = getBounds();
+            if (b.width() <= 0 || b.height() <= 0) return;
+            float h = b.height();
+            float nub = Math.max(2f, b.width() * 0.06f);
+            box.set(b.left, b.top + 1, b.right - nub, b.bottom - 1);
+            paint.setStyle(android.graphics.Paint.Style.STROKE);
+            paint.setStrokeWidth(Math.max(2f, h * 0.1f));
+            paint.setColor(color);
+            c.drawRoundRect(box, h * 0.3f, h * 0.3f, paint);
+            android.graphics.RectF cap = new android.graphics.RectF(
+                    box.right + 1, box.centerY() - h * 0.15f, b.right, box.centerY() + h * 0.15f);
+            paint.setStyle(android.graphics.Paint.Style.FILL);
+            c.drawRoundRect(cap, h * 0.1f, h * 0.1f, paint);
+            float inset = Math.max(2f, h * 0.16f);
+            android.graphics.RectF fill = new android.graphics.RectF(
+                    box.left + inset, box.top + inset,
+                    box.left + inset + (box.width() - inset * 2f) * level / 100f,
+                    box.bottom - inset);
+            c.drawRoundRect(fill, h * 0.2f, h * 0.2f, paint);
+        }
+
+        @Override
+        public void setAlpha(int alpha) {
+            paint.setAlpha(alpha);
+        }
+
+        @Override
+        public void setColorFilter(android.graphics.ColorFilter cf) {
+            paint.setColorFilter(cf);
+        }
+
+        @Override
+        public int getOpacity() {
+            return android.graphics.PixelFormat.TRANSLUCENT;
+        }
+
+        @Override
+        public int getIntrinsicWidth() {
+            return 48;
+        }
+
+        @Override
+        public int getIntrinsicHeight() {
+            return 24;
+        }
+    }
+
+    static final class Fit extends Drawable {        private final Drawable inner;
         private final float size;
         Fit(Drawable inner, float size) {
             this.inner = inner;

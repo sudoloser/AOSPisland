@@ -273,6 +273,7 @@ public final class IslandController implements IslandView.Host, IslandWindow.Lis
         statusBarView = v;
         v.addOnLayoutChangeListener(statusBarLayoutListener);
         fader.attach(v);
+        OaSource.applyStockChipVisibility(v);
         ensureWindow();
         updateGeometry();
         requestRefresh();
@@ -283,6 +284,7 @@ public final class IslandController implements IslandView.Host, IslandWindow.Lis
         v.removeOnLayoutChangeListener(statusBarLayoutListener);
         fader.detach();
         statusBarView = null;
+        OaSource.onStatusBarDetached();
     }
 
     public void setOngoingActivityController(Object controller) {
@@ -358,6 +360,12 @@ public final class IslandController implements IslandView.Host, IslandWindow.Lis
     private void refreshNow() {
         refreshPosted = false;
         ensureWindow();
+        if (!IslandSettings.enabled()) {
+            if (window != null) window.setShown(false);
+            fader.resetAll();
+            OaSource.applyStockChipVisibility(statusBarView);
+            return;
+        }
         if (view == null) return;
         List<IslandItem> items = new ArrayList<>();
         Set<String> hidden = new HashSet<>();
@@ -456,6 +464,7 @@ public final class IslandController implements IslandView.Host, IslandWindow.Lis
             lastPackages = packages;
             pushExitTargets(false);
         }
+        OaSource.applyStockChipVisibility(statusBarView);
         onIslandFrame();
     }
 

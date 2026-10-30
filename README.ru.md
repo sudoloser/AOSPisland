@@ -1,10 +1,18 @@
-# OneUisland — Dynamic Island для One UI 9
+# OneUisland — Dynamic Island для One UI 9 и AOSP 16
 
 [English](README.md) | **Русский**
 
-LSPosed-модуль (legacy Xposed API) для One UI 9 / Android 17. Заменяет капсулу Now Bar в статус-баре на динамический остров вокруг фронтальной камеры в стиле ColorOS 17 и HyperOS.
+LSPosed-модуль (legacy Xposed API) для One UI 9 / Android 17, а также для чистого AOSP 16 (API 36). Заменяет капсулу Now Bar / чип ongoing activity в статус-баре на динамический остров вокруг фронтальной камеры в стиле ColorOS 17 и HyperOS.
 
 Готовая сборка — APK в разделе [Releases](../../releases).
+
+## Поддержка AOSP 16
+
+На стоковом SystemUI AOSP 16 модуль перехватывает `OngoingActivityChipBinder.bind` — единственную точку отрисовки всех чипов статус-бара (ongoing activity, повышенные уведомления, звонок, запись экрана, трансляция, шаринг). Эти чипы уходят в остров, а штатные вью скрываются.
+
+На AOSP работает: ongoing activity, звонки, таймеры и секундомеры, повышенные уведомления, медиа, RemoteViews в живых карточках, предупреждения о заряде, DND и режиме звука, общий выключатель и возврат штатных чипов, блюр через cross-window blur (если устройство его поддерживает).
+
+На AOSP не работает или работает иначе: действия звонка (ответ, сброс, динамик) идут через `TelecomManager` и маршрутизацию `AudioManager`; оформление шторки One UI пропускается, если нет Samsung-классов; Samsung-чип трансляции и анимация вылета приложения из One UI Home отсутствуют. Флаг `StatusBarChipsModernization` (чипы на Compose) не покрыт: штатные чипы будут скрыты по id, но в остров не попадут.
 
 ## Что умеет
 
@@ -33,17 +41,20 @@ LSPosed-модуль (legacy Xposed API) для One UI 9 / Android 17. Заме�
 ## Установка
 
 1. Скачайте и установите APK из [Releases](../../releases).
-2. В LSPosed включите модуль. Область: **System UI**.
+2. В LSPosed включите модуль. Область: **System UI** (`com.android.systemui`).
+   На One UI добавьте также Voice Recorder, Claude или ChatGPT, если нужны их острова.
 3. Перезапустите System UI (перезагружать телефон не нужно), например так:
    `adb shell su -c "pkill -f com.android.systemui"`
 
 ## Сборка
 
-Нужны JDK 17–21 и Android SDK (platform 36). Путь к SDK укажите в `local.properties`:
+Нужны JDK 17 или новее и Android SDK (platform 36). Wrapper: Gradle 9.8.1 + AGP 9.4.1; проект последний раз собирался на JDK 27. Путь к SDK укажите в `local.properties`:
 
 ```
-gradlew.bat :app:assembleDebug
+./gradlew :app:assembleDebug
 ```
+
+На Windows — `gradlew.bat :app:assembleDebug`. Если `./gradlew` ругается на права, запускайте `bash gradlew`.
 
 APK появится в `app/build/outputs/apk/debug/app-debug.apk`.
 

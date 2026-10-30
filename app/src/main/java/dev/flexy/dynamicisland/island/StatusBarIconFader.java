@@ -18,7 +18,9 @@ final class StatusBarIconFader {
             "clock", "battery", "networkSpeed", "knox_status_bar_custom_text_container",
             "user_switcher_container", "carrier_logo_container", "operator_name_frame",
     };
-    private static final String[] GROUP_IDS = {"notificationIcons", "statusIcons", "system_icons"};
+    private static final String[] GROUP_IDS = {
+            "notificationIcons", "notification_icon_area", "statusIcons", "system_icons",
+    };
 
     private final float density;
     private final Map<View, Fade> fades = new WeakHashMap<>();

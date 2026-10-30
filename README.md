@@ -1,8 +1,13 @@
-# OneUisland — Dynamic Island for One UI 9
+# AOSPisland — Dynamic Island for One UI 9 and AOSP 16
+
+> [!NOTE]
+> This was ported from [spottq](https://github.com/Spottq/OneUisland) all credit to them.
+> Note that blur does not yet work, but will fix eventually.
+> I do NOT plan on maintaining this project for a while
 
 **English** | [Русский](README.ru.md)
 
-An LSPosed module (legacy Xposed API) for One UI 9 / Android 17. It replaces the Now Bar capsule in the status bar with a dynamic island around the front camera, in the style of ColorOS 17 and HyperOS.
+An LSPosed module (legacy Xposed API) for One UI 9 / Android 17, and for stock AOSP 16 (API 36). It replaces the ongoing-activity capsule in the status bar with a dynamic island around the front camera, in the style of ColorOS 17 and HyperOS.
 
 Get the ready-made APK from [Releases](../../releases).
 
@@ -29,10 +34,31 @@ Get the ready-made APK from [Releases](../../releases).
 - Short alerts: Do Not Disturb, sound / vibrate / mute, low battery (20% and 10%, shown for 5 s) and headphone battery (AirPods via LibrePods, Galaxy Buds, Fast Pair) with a red Low Battery alert at 10%.
 - Live notifications in the shade are styled as dark glass island cards: light text, a thin rim and a solid background when blur is off. App layouts, expansion and actions are kept. Regular notifications and the lock screen keep the system look.
 
+## Android 16 (AOSP) support
+
+The module also runs on stock AOSP 16 SystemUI. It hooks `OngoingActivityChipBinder.bind`, which on AOSP is the single entry point for every status bar chip (ongoing activity, promoted notification, call, screen recording, cast, share), feeds those chips into the island and hides the stock chip views.
+
+What works on AOSP:
+
+- Ongoing activities, call, timer/countdown/stopwatch chips, promoted notifications.
+- Media (from `MediaDataManager`), live card RemoteViews.
+- Low battery, Do Not Disturb, sound mode and headphone battery alerts.
+- Master switch and the "hide stock chips" switch, so turning the module off restores the system chips.
+- Blur via AOSP cross-window blur regions when the device supports them, otherwise flat dark cards.
+
+Limitations on AOSP:
+
+- Call actions (answer, hang up, speaker) use `TelecomManager` and `AudioManager` routing rather than One UI call-chip actions; a speaker toggle may need `MODIFY_AUDIO_ROUTING`-level access and can silently do nothing on locked-down builds.
+- One UI shade styling (`ShadePerf`, `ShadeLiveCards`, `ShadeCardTheme`, `ShadeMediaPlayer`, `ShadeLayoutCallbacks`) is skipped when the Samsung classes are missing.
+- Samsung cast chip and the app-exit fly-in animation have no AOSP equivalent.
+- `StatusBarChipsModernization` (Compose-based chips) is not covered. If your build enables that flag, the stock chips are hidden by id but not fed into the island.
+
 ## Settings
 
 Open the module settings from LSPosed:
 
+- Enable Dynamic Island (master switch; off hides the overlay and restores the system chips).
+- Hide stock status bar chips.
 - Island length (in characters).
 - Detailed second capsule.
 - Cards: frosted glass design, recent Spotify playlists.
@@ -42,21 +68,26 @@ Open the module settings from LSPosed:
 ## Installation
 
 1. Download and install the APK from [Releases](../../releases).
-2. Enable the module in LSPosed. Scope: **System UI**.
+2. Enable the module in LSPosed. Scope: **System UI** (`com.android.systemui`).
+   On One UI also add Voice Recorder, Claude or ChatGPT if you want their islands.
 3. Restart System UI (no reboot needed), for example:
    `adb shell su -c "pkill -f com.android.systemui"`
 
+If the island misbehaves, disable the module in LSPosed and restart System UI; the master switch in the module settings works too.
+
 ## Building
 
-You need JDK 17–21 and the Android SDK (platform 36). Set the SDK path in `local.properties`, then run:
+You need JDK 17 or newer and the Android SDK (platform 36). The wrapper is Gradle 9.8.1 with AGP 9.4.1; this project was last built with JDK 27. Set the SDK path in `local.properties`, then run:
 
 ```
-gradlew.bat :app:assembleDebug
+./gradlew :app:assembleDebug
 ```
+
+On Windows use `gradlew.bat :app:assembleDebug`. If `./gradlew` complains about permissions, run it as `bash gradlew`.
 
 The APK ends up in `app/build/outputs/apk/debug/app-debug.apk`.
 
-To check the shade styling logic on a connected Android 17 device without installing the APK or restarting System UI, run `./tests/device/run.ps1` (PowerShell, JDK in `JAVA_HOME`). Details and the list of visual checks are in `tests/device/README.md`.
+To check the shade styling logic on a connected One UI 9 device without installing the APK or restarting System UI, run `./tests/device/run.ps1` (PowerShell, JDK in `JAVA_HOME`). Details and the list of visual checks are in `tests/device/README.md`.
 
 ## Structure
 

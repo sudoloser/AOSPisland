@@ -3,17 +3,20 @@ package dev.flexy.dynamicisland.xposed;
 import android.app.Application;
 import android.app.Instrumentation;
 import android.content.res.Resources;
-import android.os.Build;
 import android.view.View;
 
 import java.util.Set;
 
 import de.robv.android.xposed.XposedBridge;
 import dev.flexy.dynamicisland.island.IslandController;
+import dev.flexy.dynamicisland.island.IslandSettings;
+import dev.flexy.dynamicisland.island.OaSource;
 
 final class SystemUiHooks {
     private static final String SUI = "com.android.systemui";
     private static final String OA = "com.android.systemui.statusbar.phone.ongoingactivity.";
+    private static final String CHIPS = "com.android.systemui.statusbar.chips.";
+    private static final String SAMSUNG_MARKER = "com.android.systemui.battery.SamsungBatteryMeterDrawable";
 
     private static volatile Object oaController;
     private static volatile Object callController;
@@ -23,11 +26,15 @@ final class SystemUiHooks {
     private static volatile boolean dozing;
     private static volatile int windowState;
 
+    private static volatile View statusBarView;
+
     private static int idCapsule;
     private static int idCapsuleContainer;
     private static int idChipsContainer;
     private static int idCastChip;
     private static int idCallChip;
+    private static int idChipPrimary;
+    private static int idChipSecondary;
 
     private SystemUiHooks() {
     }
@@ -35,20 +42,30 @@ final class SystemUiHooks {
     static void install(ClassLoader cl) {
         hookInit(cl);
         hookStatusBarView(cl);
+        hookAospChips(cl);
         hookCapsuleHiding(cl);
         hookDataChanges(cl);
         hookCalls(cl);
         hookCast(cl);
         hookSignals(cl);
-        if (Build.VERSION.SDK_INT == 36) hookAndroid16Chips(cl);
-        ShadePerf.install(cl);
-        ShadeLayoutCallbacks.install();
-        ShadeLiveCards.install(cl);
+        hookAndroid16Chips(cl);
+        if (isSamsung(cl)) hookSamsungShade(cl);
         HideDuplicated.install(cl);
         TorchNotificationDelay.install(cl);
+        XLog.i("SystemUI hooks installed");
+    }
+
+    /** One UI SystemUI ships classes AOSP does not have; the shade styling needs all of them. */
+    private static boolean isSamsung(ClassLoader cl) {
+        return Refl.findClass(SAMSUNG_MARKER, cl) != null;
+    }
+
+    private static void hookSamsungShade(ClassLoader cl) {
+        ShadePerf.install(cl);
+        ShadeLayoutCallbacks.install(cl);
+        ShadeLiveCards.install(cl);
         ShadeCardTheme.install(cl);
         ShadeMediaPlayer.install(cl);
-        XLog.i("SystemUI hooks installed");
     }
 
     private static IslandController c() {
@@ -60,6 +77,14 @@ final class SystemUiHooks {
         if (c != null) c.requestRefresh();
     }
 
+    /** Keeps the stock chips in sync with the master and chip switches. */
+    static void applyStockChipVisibility() {
+        try {
+            OaSource.applyStockChipVisibility(statusBarView);
+        } catch (Throwable t) {
+            XLog.e("stock chip visibility failed", t);
+        }
+    }
 
     private static void hookInit(ClassLoader cl) {
         XposedBridge.hookAllMethods(Instrumentation.class, "callApplicationOnCreate",
@@ -85,20 +110,39 @@ final class SystemUiHooks {
         idChipsContainer = res.getIdentifier("samsung_status_bar_chips_container", "id", SUI);
         idCastChip = res.getIdentifier("samsung_ongoing_cast_chip", "id", SUI);
         idCallChip = res.getIdentifier("ongoing_call_chip", "id", SUI);
+        idChipPrimary = res.getIdentifier("ongoing_activity_chip_primary", "id", SUI);
+        idChipSecondary = res.getIdentifier("ongoing_activity_chip_secondary", "id", SUI);
     }
 
     private static void hookStatusBarView(ClassLoader cl) {
         String ctrl = "com.android.systemui.statusbar.phone.PhoneStatusBarViewController";
         Refl.hookAll(cl, ctrl, "onViewAttached", SafeHook.after("onViewAttached", p -> {
             Object v = Refl.get(p.thisObject, "mView");
+            if (!(v instanceof View)) return;
+            statusBarView = (View) v;
+            applyStockChipVisibility();
             IslandController c = c();
-            if (v instanceof View && c != null) c.onStatusBarViewAttached((View) v);
+            if (c != null) c.onStatusBarViewAttached((View) v);
         }));
         Refl.hookAll(cl, ctrl, "onViewDetached", SafeHook.after("onViewDetached", p -> {
             Object v = Refl.get(p.thisObject, "mView");
+            if (!(v instanceof View)) return;
+            if (statusBarView == v) statusBarView = null;
             IslandController c = c();
-            if (v instanceof View && c != null) c.onStatusBarViewDetached((View) v);
+            if (c != null) c.onStatusBarViewDetached((View) v);
         }));
+    }
+
+    /**
+     * AOSP 16 status bar chips: every chip (ongoing activity, promoted notification, call, screen
+     * record, cast, share) is rendered through {@code OngoingActivityChipBinder.bind}, so this is
+     * the single place that both feeds the island and hides the stock chip.
+     */
+    private static void hookAospChips(ClassLoader cl) {
+        Refl.hookAll(cl, CHIPS + "ui.binder.OngoingActivityChipBinder", "bind",
+                SafeHook.after("AOSP chip bind", p -> {
+                    if (p.args.length >= 2) OaSource.onAospChip(p.args[0], p.args[1]);
+                }));
     }
 
     private static void hookCapsuleHiding(ClassLoader cl) {
@@ -108,10 +152,26 @@ final class SystemUiHooks {
                     View v = (View) p.args[0];
                     int id = v.getId();
                     if (id != View.NO_ID && (id == idCapsuleContainer || id == idChipsContainer
-                            || id == idCastChip || id == idCallChip)) {
+                            || id == idCastChip || id == idCallChip
+                            || id == idChipPrimary || id == idChipSecondary)) {
+                        boolean hide = IslandSettings.hidingChips();
                         v.animate().cancel();
-                        v.setVisibility(View.GONE);
-                        p.setResult(null);
+                        v.setVisibility(hide ? View.GONE : View.VISIBLE);
+                        if (hide) p.setResult(null);
+                    }
+                }));
+
+        Refl.hookAll(cl, "com.android.systemui.statusbar.phone.fragment.CollapsedStatusBarFragment", "animateShow",
+                SafeHook.before("animateShow", p -> {
+                    if (p.args.length < 1 || !(p.args[0] instanceof View)) return;
+                    View v = (View) p.args[0];
+                    int id = v.getId();
+                    if (id != View.NO_ID && (id == idCastChip || id == idCallChip
+                            || id == idChipPrimary || id == idChipSecondary)) {
+                        boolean hide = IslandSettings.hidingChips();
+                        v.animate().cancel();
+                        v.setVisibility(hide ? View.GONE : View.VISIBLE);
+                        if (hide) p.setResult(null);
                     }
                 }));
 
@@ -119,7 +179,7 @@ final class SystemUiHooks {
                 SafeHook.before("updateParentViewVisibility", p -> {
                     Object ctrl = p.thisObject;
                     Object parent = Refl.get(ctrl, "mParentView");
-                    if (parent instanceof View) {
+                    if (parent instanceof View && IslandSettings.hidingChips()) {
                         ((View) parent).animate().cancel();
                         ((View) parent).setVisibility(View.GONE);
                     }
@@ -156,26 +216,18 @@ final class SystemUiHooks {
                 }));
     }
 
+    /**
+     * AOSP 16 call chip plus the older chip entry points. Call controller fields are identical on
+     * AOSP, so the island can read them directly for the app name, icon, chronometer and intent.
+     */
     private static void hookAndroid16Chips(ClassLoader cl) {
-        Refl.hookAll(cl, "com.android.systemui.statusbar.phone.fragment.CollapsedStatusBarFragment", "animateShow",
-                SafeHook.before("animateShow (A16)", p -> {
-                    if (p.args.length < 1 || !(p.args[0] instanceof View)) return;
-                    View v = (View) p.args[0];
-                    int id = v.getId();
-                    if (id != View.NO_ID && (id == idCastChip || id == idCallChip)) {
-                        v.animate().cancel();
-                        v.setVisibility(View.GONE);
-                        p.setResult(null);
-                    }
-                }));
-
         String call = "com.android.systemui.statusbar.phone.ongoingcall.OngoingCallController";
-        Refl.hookConstructors(cl, call, SafeHook.after("call ctor (A16)", p -> {
+        Refl.hookConstructors(cl, call, SafeHook.after("call ctor (AOSP)", p -> {
             callController = p.thisObject;
             IslandController c = c();
             if (c != null) c.setCallController(p.thisObject);
         }));
-        SafeHook refreshHook = SafeHook.after("call change (A16)", p -> refresh());
+        SafeHook refreshHook = SafeHook.after("call change (AOSP)", p -> refresh());
         for (String m : new String[]{"sendStateChangeEvent", "updateChip", "removeChipInfo"}) {
             Refl.hookAll(cl, call, m, refreshHook);
         }
@@ -199,6 +251,7 @@ final class SystemUiHooks {
     private static void hookCalls(ClassLoader cl) {
         String call = "com.android.systemui.statusbar.phone.ongoingcall.SamsungOngoingCallController";
         Refl.hookConstructors(cl, call, SafeHook.after("call ctor", p -> {
+            if (callController != null) return;
             callController = p.thisObject;
             IslandController c = c();
             if (c != null) c.setCallController(p.thisObject);

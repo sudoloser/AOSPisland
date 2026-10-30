@@ -4,7 +4,9 @@ import android.annotation.SuppressLint;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.RectF;
+import android.graphics.drawable.Drawable;
 import android.view.View;
+import android.view.WindowManager;
 import android.widget.FrameLayout;
 
 import java.lang.reflect.Constructor;
@@ -30,6 +32,8 @@ final class BlurLayer extends FrameLayout implements IslandView.BlurSink {
     private static Method semSetCorner;
     private static Boolean supported;
 
+    private final WindowManager wm;
+    private boolean aospBlur;
     private final Map<Object, Slot> slots = new IdentityHashMap<>();
     private final Set<Object> placed = new HashSet<>();
     private final java.util.ArrayDeque<Slot> free = new java.util.ArrayDeque<>();
@@ -39,6 +43,8 @@ final class BlurLayer extends FrameLayout implements IslandView.BlurSink {
 
     BlurLayer(Context context) {
         super(context);
+        wm = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
+        aospBlur = !isSupported() && aospCapable();
         setClipChildren(false);
         setWillNotDraw(true);
     }
@@ -46,7 +52,7 @@ final class BlurLayer extends FrameLayout implements IslandView.BlurSink {
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
-        if (getChildCount() == 0 && isSupported()) {
+        if (getChildCount() == 0 && (isSupported() || aospBlur)) {
             for (int i = 0; i < POOL; i++) {
                 Slot s = new Slot(getContext());
                 addView(s, new LayoutParams(0, 0));
@@ -60,6 +66,7 @@ final class BlurLayer extends FrameLayout implements IslandView.BlurSink {
     protected void onLayout(boolean changed, int l, int t, int r, int b) {
     }
 
+    /** Samsung exposes SemBlurInfo; AOSP blurs through a background blur drawable instead. */
     static boolean isSupported() {
         if (supported == null) {
             try {
@@ -78,16 +85,47 @@ final class BlurLayer extends FrameLayout implements IslandView.BlurSink {
                 }
                 supported = true;
             } catch (Throwable t) {
-                XLog.e("SemBlurInfo unavailable", t);
                 supported = false;
             }
         }
         return supported;
     }
 
+    private static boolean aospCapable() {
+        return systemBoolean("ro.surface_flinger.supports_background_blur", false)
+                && !systemBoolean("persist.sysui.disableBlur", false);
+    }
+
+    private static boolean systemBoolean(String key, boolean def) {
+        try {
+            Class<?> props = Class.forName("android.os.SystemProperties");
+            Method get = props.getDeclaredMethod("getBoolean", String.class, boolean.class);
+            get.setAccessible(true);
+            Object v = get.invoke(null, key, def);
+            return v instanceof Boolean ? (Boolean) v : def;
+        } catch (Throwable t) {
+            return def;
+        }
+    }
+
+    private boolean crossWindowBlurEnabled() {
+        try {
+            return wm != null && wm.isCrossWindowBlurEnabled();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private void disableAospBlur() {
+        if (!aospBlur) return;
+        aospBlur = false;
+        for (Slot slot : slots.values()) slot.clearBlur();
+        for (Slot slot : free) slot.clearBlur();
+    }
+
     @Override
     public boolean available() {
-        return isSupported();
+        return isSupported() || (aospBlur && crossWindowBlurEnabled());
     }
 
     @Override
@@ -154,10 +192,17 @@ final class BlurLayer extends FrameLayout implements IslandView.BlurSink {
         private float corner = -1f;
         private int radius = RADIUS;
         private int appliedRadius = -1;
+        private Drawable aospDrawable;
 
         Slot(Context c) {
             super(c);
             setWillNotDraw(false);
+        }
+
+        @Override
+        protected void onAttachedToWindow() {
+            super.onAttachedToWindow();
+            ensureAospBlur();
         }
 
         void update(RectF r, float c, float alpha, int blurRadius) {
@@ -169,6 +214,7 @@ final class BlurLayer extends FrameLayout implements IslandView.BlurSink {
             setLeftTopRightBottom(Math.round(r.left), Math.round(r.top), Math.round(r.right), Math.round(r.bottom));
             setAlpha(Math.max(PARKED_ALPHA, alpha));
             if (isSupported()) applyBlur(c);
+            else if (aospBlur) applyAospBlur(c);
             if (getVisibility() != VISIBLE) setVisibility(VISIBLE);
             invalidate();
         }
@@ -177,8 +223,53 @@ final class BlurLayer extends FrameLayout implements IslandView.BlurSink {
             setLeftTopRightBottom(0, 0, 2, 2);
             setAlpha(PARKED_ALPHA);
             if (isSupported()) applyBlur(1f);
+            else if (aospBlur) applyAospBlur(1f);
             if (getVisibility() != VISIBLE) setVisibility(VISIBLE);
             invalidate();
+        }
+
+        private void ensureAospBlur() {
+            if (aospDrawable != null || !aospBlur) return;
+            try {
+                Object viewRoot = dev.flexy.dynamicisland.xposed.Refl.call(this, "getViewRootImpl");
+                Object created = viewRoot == null ? null
+                        : dev.flexy.dynamicisland.xposed.Refl.call(viewRoot, "createBackgroundBlurDrawable");
+                if (!(created instanceof Drawable)) {
+                    disableAospBlur();
+                    return;
+                }
+                Drawable d = (Drawable) created;
+                dev.flexy.dynamicisland.xposed.Refl.call(d, "setBlurRadius", RADIUS);
+                dev.flexy.dynamicisland.xposed.Refl.call(d, "setCornerRadius", 1f);
+                dev.flexy.dynamicisland.xposed.Refl.call(d, "setColor", 0x14000000);
+                setBackground(d);
+                aospDrawable = d;
+            } catch (Throwable t) {
+                XLog.e("AOSP blur setup failed", t);
+                disableAospBlur();
+            }
+        }
+
+        private void applyAospBlur(float c) {
+            ensureAospBlur();
+            if (aospDrawable == null) return;
+            if (Math.abs(c - corner) < 1f) return;
+            try {
+                dev.flexy.dynamicisland.xposed.Refl.call(aospDrawable, "setCornerRadius", c);
+                corner = c;
+            } catch (Throwable t) {
+                XLog.e("AOSP blur corner failed", t);
+                disableAospBlur();
+            }
+        }
+
+        void clearBlur() {
+            if (aospDrawable == null) return;
+            aospDrawable.setAlpha(0);
+            setBackground(null);
+            aospDrawable = null;
+            blurSet = false;
+            corner = -1f;
         }
 
         private void applyBlur(float c) {

@@ -68,6 +68,8 @@ public final class SettingsActivity extends Activity {
         root.addView(title);
 
         LinearLayout island = group(root, "Island");
+        toggle(island, "Enable Dynamic Island", Settings.ENABLED, Settings.DEF_ENABLED);
+        toggle(island, "Hide stock status bar chips", Settings.HIDE_STOCK_CHIPS, Settings.DEF_HIDE_STOCK_CHIPS);
         slider(island, "Island length", Settings.MAX_CHARS, Settings.MIN_MAX_CHARS, Settings.NO_MAX_CHARS,
                 Settings.DEF_MAX_CHARS, v -> v >= Settings.NO_MAX_CHARS ? "No limit" : v + " chars", Settings.PREVIEW_LENGTH);
         link(island, "Island position", this::positionSummary, () ->

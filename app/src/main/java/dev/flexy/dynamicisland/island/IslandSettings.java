@@ -10,10 +10,22 @@ import android.os.Looper;
 import dev.flexy.dynamicisland.Settings;
 import dev.flexy.dynamicisland.xposed.XLog;
 
-final class IslandSettings {
+public final class IslandSettings {
     private static volatile Bundle values = new Bundle();
 
     private IslandSettings() {
+    }
+
+    public static boolean enabled() {
+        return values.getBoolean(Settings.ENABLED, Settings.DEF_ENABLED);
+    }
+
+    public static boolean hideStockChips() {
+        return values.getBoolean(Settings.HIDE_STOCK_CHIPS, Settings.DEF_HIDE_STOCK_CHIPS);
+    }
+
+    public static boolean hidingChips() {
+        return enabled() && hideStockChips();
     }
 
     static int maxChars() {

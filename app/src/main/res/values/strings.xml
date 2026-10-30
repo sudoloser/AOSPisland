@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Dynamic Island</string>
-    <string name="xposed_description">Dynamic Island in the style of ColorOS / HyperOS: replaces the One UI Now Bar status bar capsule.</string>
+    <string name="xposed_description">Dynamic Island in the style of ColorOS / HyperOS: replaces the One UI Now Bar capsule or the AOSP ongoing activity chip with an island around the front camera.</string>
     <string-array name="xposed_scope">
         <item>com.android.systemui</item>
         <item>com.sec.android.app.voicenote</item>
